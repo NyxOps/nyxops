@@ -10,8 +10,8 @@ NyxOps is an open source police records management system (RMS). It stores Crimi
 
 ## Current state
 
-- The original scaffold (`nyx-api` FastAPI, `nyx-web` Next.js, `nyx-infra` Docker Compose with Celery, RabbitMQ, Redis, MinIO, Meilisearch, Keycloak) is being replaced. Don't add features, dependencies, or fixes to it unless the user asks.
-- `nyx-worker` is empty and its README describes an unrelated project.
+- This repo (`NyxOps/nyxops`, formerly `nyx-design`) is the monorepo. The old scaffold repos (`nyx-api`, `nyx-web`, `nyx-infra`, `nyx-worker`) were deleted on 2026-11-23; don't recreate them or reintroduce FastAPI, Next.js, Celery, RabbitMQ, Redis, MinIO, Meilisearch, or Keycloak.
+- Spec section 2 lists the scaffold's defects; don't repeat them in the port.
 - No Go code, build commands, or tests exist yet. Don't invent commands; check the repo first.
 
 ## Target stack
