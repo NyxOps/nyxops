@@ -1,6 +1,6 @@
-# nyx-design
+# nyxops
 
-Architecture, specifications, and brand assets for NyxOps, the open source records management system (RMS) for law enforcement agencies. Read this file before contributing code to any NyxOps repository.
+The NyxOps monorepo: architecture, specifications, brand assets, and (from phase 0 on) all code for NyxOps, the open source records management system (RMS) for law enforcement agencies. Read this file before contributing.
 
 | Path | Contents |
 | --- | --- |
@@ -11,7 +11,7 @@ Architecture, specifications, and brand assets for NyxOps, the open source recor
 
 ## Project status
 
-NyxOps is moving from its original scaffold (FastAPI in `nyx-api`, Next.js in `nyx-web`, Celery and RabbitMQ in `nyx-infra`) to the Go architecture described here. The scaffold holds three SQLAlchemy models and a health endpoint; don't add features to it. New work goes into a single monorepo with the layout below.
+The original Python and Next.js scaffold repos (`nyx-api`, `nyx-web`, `nyx-infra`, `nyx-worker`) were deleted on 2026-11-23. This repo, formerly `nyx-design`, is now the monorepo; Go code arrives in phase 0 using the layout below. Section 2 of the spec lists the scaffold defects the port must not repeat.
 
 ## Architecture
 

@@ -21,7 +21,9 @@ The design goals, in priority order when they conflict:
 3. Fast: sub-50 ms server time for normal record reads and writes on modest hardware.
 4. Maintainable for 10 or more years by a small open source team.
 
-## 2. Findings in the current scaffold
+## 2. Findings in the original scaffold
+
+The scaffold repos were deleted on 2026-11-23 and `nyx-design` became the `nyxops` monorepo. The defects below still apply as requirements for the port.
 
 The repos contain little code, so the stack change costs almost nothing now. Fix these defects during the port regardless of language:
 
