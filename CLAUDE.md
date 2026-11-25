@@ -4,7 +4,7 @@ NyxOps is an open source police records management system (RMS). It stores Crimi
 
 ## Source of truth
 
-- `nyx-project-specs/NyxOps_Architecture.md` defines the architecture and the accepted decision log (D-001 to D-014). Read the relevant section before designing anything, and follow it over any older document.
+- `nyx-project-specs/NyxOps_Architecture.md` defines the architecture and the accepted decision log (D-001 to D-015). Read the relevant section before designing anything, and follow it over any older document.
 - If a task conflicts with the spec, stop and tell the user instead of working around the spec.
 
 ## Current state
@@ -41,7 +41,8 @@ Database and tenancy:
 
 Events and audit:
 
-- Write each domain change and its event row in the same transaction.
+- Write each domain change, its event row (`events`), and its audit row (`audit_events`) in the same transaction.
+- Commit an `audit_events` row before returning any sensitive read, search, export, or download; never mix read-access rows into `events`.
 - Event consumers read by `xact_id` up to the `pg_snapshot_xmin` watermark, never by a serial cursor.
 - Never update or delete audit rows, and never write code that needs to.
 - Keep CJI values out of event payloads, logs, metrics, error messages, and test fixtures. Use synthetic data in tests.

@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Status | Accepted |
-| Version | 1.1 |
+| Version | 1.2 |
 | Date | 2026-11-24 |
 | Scope | Backend, frontend, data, security, deployment, and the policy for what NyxOps builds versus what it depends on |
 
@@ -26,7 +26,7 @@ Use UUIDv7 primary keys. Scope report numbers and other agency-specific unique c
 
 ## 3. Backend
 
-The API and workers share one Go binary. Use the standard library for HTTP, TLS, cryptography, JSON, logging and tests. Pin dependency versions and deployment images.
+The API and workers share one Go binary targeting Go 1.24 or later, built with `CGO_ENABLED=0` and `GOFIPS140`. Use the standard library for HTTP, TLS, cryptography, JSON, logging and tests. Embed the built frontend (`web/dist`), SQL migrations (`db/migrations`), and base FBI NIBRS rule packs (`rules/`) with `//go:embed`; load agency-specific state IBR packs from a runtime directory without rebuilding. Pin dependency versions and deployment images.
 
 ## 4. Dependency policy
 
@@ -48,27 +48,27 @@ Any runtime dependency, whether adopted or replacing a built component, needs a 
 | Database driver | Adopt | `pgx` v5 |
 | Query layer | Adopt (build time) | `sqlc` |
 | Migrations | Build | Embedded SQL files, advisory lock, version table and reviewable SQL policies |
-| HTTP and API | Build | `net/http` routing, spec-first OpenAPI file, `oapi-codegen` (build time) |
+| HTTP and API | Build | `net/http` routing, spec-first OpenAPI (`/api/v1`), `oapi-codegen` (build time), `ETag`/version optimistic concurrency, cursor pagination, RFC 9457 Problem Details errors |
 | Job execution | Adopt behind interface | River (D-009) |
 | Event log and outbox | Build | Section 7.1 |
 | Identity provider | Adopt, swappable | Any OIDC provider; Zitadel bundled for agencies without one (D-007) |
-| Token verification | Adopt | `go-oidc`, `go-jose` |
-| Browser sessions | Build | Backend-for-frontend; sessions in Postgres; HttpOnly, SameSite=Strict cookies |
+| OIDC and token verification | Adopt | `go-oidc` (`go-jose` transitive) and `golang.org/x/oauth2` |
+| Browser sessions | Build | Backend-for-frontend; sessions in Postgres; `HttpOnly`, `SameSite=Strict` cookies; CSRF origin/token checks, CSP, HSTS, and `Cache-Control: no-store` on CJI responses |
 | Authorization | Build | Section 7.2 |
 | Audit log | Build | Section 7.3, Merkle math from `golang.org/x/mod/sumdb/tlog` |
 | Cryptographic primitives | Adopt | Go standard library in FIPS mode |
-| Envelope encryption and key handling | Build | AES-GCM and HKDF from the standard library; pluggable key-encryption-key source |
+| Envelope encryption and key handling | Build | AES-GCM and HKDF from the standard library; pluggable `KeyStore` and key-encryption-key sources |
 | Object storage engine | Adopt, optional | Any S3-compatible service; Garage as the self-hosted default |
 | Evidence and file store | Build | Section 7.6, with local-disk and minimal S3 backends |
-| Search | Build | Approved fields only (section 7.1), PostgreSQL full-text search, `pg_trgm`, `fuzzystrmatch` |
+| Search | Build | Per-agency HMAC blind indexes for exact identifier/report-number lookups; sensitive fields stay encrypted unless an explicit per-field privacy ADR approves PostgreSQL FTS/`pg_trgm`/`fuzzystrmatch` (section 7.1) |
 | Person matching | Build | Section 7.5 |
 | NIBRS validation and export | Build | Section 7.7 |
 | Rule expressions | Adopt | `cel-go` |
 | Forms | Build | Generated from the rule definitions (section 7.7) |
 | Offline drafts | Build | Section 7.8 |
-| PDF output | Adopt | Typst CLI in a sandboxed worker process |
+| PDF output | Adopt | Static Typst CLI binary in the sandboxed worker image (mounted tmpfs/`emptyDir` scratch, no network) or an optional sidecar container in Helm |
 | TLS termination | Build | `golang.org/x/crypto/acme/autocert` or agency-supplied certificates |
-| Metrics and logs | Build | `/metrics` in Prometheus text format; `log/slog`, optional tracing behind a build tag |
+| Metrics and logs | Build | `/metrics` in Prometheus text format; `log/slog`; optional OpenTelemetry tracing behind a build tag (requires a dependency ADR before adoption) |
 | Backup and restore | Build | `nyx backup` wrapping `pg_basebackup` and the file store, separate key backups and scheduled restore tests |
 | Frontend runtime | Adopt | React, TanStack Router, TanStack Query, Radix primitives |
 | Frontend build | Adopt (build time) | Vite, TypeScript, Tailwind CSS |
@@ -76,13 +76,14 @@ Any runtime dependency, whether adopted or replacing a built component, needs a 
 
 ### Runtime dependency inventory
 
-The production Go binary carries six direct dependencies:
+The production Go binary carries seven direct dependencies (`go-jose` is transitive via `go-oidc`):
 
 | Module | License | Purpose |
 | --- | --- | --- |
 | `github.com/jackc/pgx/v5` | MIT | PostgreSQL driver and pool |
 | `github.com/riverqueue/river` | MPL-2.0 | Job execution |
 | `github.com/coreos/go-oidc/v3` | Apache-2.0 | OIDC client and token verification |
+| `golang.org/x/oauth2` | BSD-3-Clause | OAuth2 authorization code and PKCE token exchange |
 | `github.com/google/cel-go` | Apache-2.0 | Policy and validation expressions |
 | `golang.org/x/crypto` | BSD-3-Clause | ACME certificates |
 | `golang.org/x/mod` | BSD-3-Clause | Transparency log math and signed notes |
@@ -98,7 +99,7 @@ flowchart LR
     subgraph nyx["nyx binary"]
         http["HTTP + TLS + static UI"]
         authz["Authorization"]
-        domain["Domain modules (incidents, persons, evidence, warrants)"]
+        domain["Domain modules (incidents, persons, evidence)"]
         rules["Rule engine (CEL)"]
         events["Event log"]
         workers["Workers (River)"]
@@ -114,9 +115,9 @@ flowchart LR
     http --> authz --> domain
     domain --> rules
     domain -- "same transaction" --> events
+    domain -- "mutations & reads" --> audit
     domain --> crypto --> files
     events --> workers
-    events --> audit
     workers --> typst
     domain --> pg
     events --> pg
@@ -129,13 +130,13 @@ The `nyx` binary has subcommands `init`, `serve`, `worker`, `migrate`, `backup`,
 
 ### 7.1 Event log ties every downstream feature to one transactional stream
 
-Every domain change writes an event row in the same transaction as the data change. Consumers (audit log, search indexer, NIBRS aggregator, notifications, offline sync, future inter-agency sharing) read the stream; consumers that need current values fetch them through the authorized domain read path.
+Every domain change writes an event row in the same transaction as the data change. Consumers (search indexer, NIBRS aggregator, notifications, offline sync, future inter-agency sharing) read the stream; consumers that need current values fetch them through the authorized domain read path. Read-access disclosures write to `audit_events` (section 7.3) rather than `events` so downstream consumers don't scan read traffic.
 
 - Schema: `events(id uuid, agency_id, aggregate_type, aggregate_id, event_type, payload jsonb, actor_id, xact_id xid8, recorded_at)`.
 - Ordering: a `bigserial` cursor isn't safe because a transaction that commits late can insert a lower sequence number after a consumer has moved past it. Within a single snapshot, read rows with `xact_id < pg_snapshot_xmin(pg_current_snapshot())` in ascending `(xact_id, id)` order, starting strictly after the last saved pair. Commit database effects and the consumer cursor together. Queue external deliveries in that transaction and deduplicate retries by event ID at the destination. Test a transaction split across batches, a delayed commit and a worker restart.
 - Payloads carry identifiers and changed field names; sensitive field values stay in the encrypted domain tables so crypto-shredding (section 7.4) reaches them.
 
-Phase 2 supports exact lookup by agency and opaque incident ID. Workflow status may be indexed inside the agency. Narratives, names, dates of birth and identifiers stay encrypted. Full-text terms, trigrams, phonetic codes and identifier fragments can disclose source values. Before enabling each additional search or matching field, document its source, stored derivatives, permitted readers and removal from live data and backups. Phase 4 matching initially computes sensitive comparisons in memory on authorized agency records.
+Phase 2 supports exact lookup by agency, opaque incident ID, and per-agency HMAC blind indexes for exact identifiers such as report numbers. Workflow status may be indexed inside the agency. Narratives, names, dates of birth and identifiers stay encrypted. Full-text terms, trigrams, phonetic codes and identifier fragments can disclose source values. Before enabling any plaintext PostgreSQL FTS, trigram, or phonetic search field, write a decision record documenting its source, stored derivatives, permitted readers and removal from live data and backups. Phase 4 matching initially computes sensitive comparisons in memory on authorized agency records.
 
 ### 7.2 One policy definition drives both API checks and PostgreSQL RLS
 
@@ -143,41 +144,47 @@ Access rules are written once and enforced twice: by the API before it runs a qu
 
 Rules cover:
 
-- Agency tenancy and multi-agency sharing agreements.
+- Agency tenancy and multi-agency sharing agreements: explicit `record_shares` and `agency_agreements` tables; the policy compiler emits `agency_id = current_agency() OR EXISTS (...)` predicates so cross-agency access stays strictly read-scoped and auditable.
 - Role and assignment: case team members, supervisors, records staff.
 - Sensitivity labels: sealed, juvenile, confidential informant, CJI versus non-CJI.
 - Reason for access: sensitive lookups require a stated purpose, which goes into the audit log; break-glass access notifies a supervisor.
 
-Policies use a restricted CEL subset over subject attributes (roles, assignments, agency) and record attributes (agency, labels, case team). A compiler translates each policy into a SQL predicate for `CREATE POLICY` statements in a generated migration. The application role isn't a superuser, every tenant table uses `FORCE ROW LEVEL SECURITY`, and the request transaction sets context with `set_config(..., true)`.
+Policies use a restricted CEL subset over subject attributes (roles, assignments, agency) and record attributes (agency, labels, case team). A compiler translates each policy into a SQL predicate for `CREATE POLICY` statements in a generated migration. The application role isn't a superuser, every tenant table uses `FORCE ROW LEVEL SECURITY`, and the request transaction sets context with `set_config('app.agency_id', $1, true)`. Background workers iterate per agency and set `app.agency_id` inside each transaction; global system tables (`river_*`, audit checkpoints, agency registry) have no RLS.
 
 Differential tests generate random subjects and records and assert the API decision equals the database decision.
 
-Phase 0 uses a short-lived, single-use OIDC login transaction with state, nonce and PKCE S256. Bind it to the initiating browser with a Secure, HttpOnly, SameSite=Lax correlation cookie for the top-level GET callback. Verify the transaction and tokens before issuing the Strict session cookie. Resolve the verified issuer and subject to an explicitly provisioned agency membership. Check current membership on every request and revoke affected sessions on removal. Exercise the callback with an identity provider on another site.
+Phase 0 uses a short-lived, single-use OIDC login transaction with state, nonce and PKCE S256. Bind it to the initiating browser with a `Secure`, `HttpOnly`, `SameSite=Lax` correlation cookie for the top-level GET callback. Verify the transaction, tokens, and MFA claims (`amr`/`acr` when configured for an external IdP) before issuing the `SameSite=Strict` session cookie. Resolve the verified issuer and subject to an explicitly provisioned agency membership. `nyx init` bootstraps the first agency and initial administrator (by OIDC issuer/subject or a single-use setup token), and agency administrators manage memberships and roles in the NyxOps UI (with optional OIDC group sync in a later phase). Check current membership on every request and revoke affected sessions on removal. Exercise the callback with an identity provider on another site.
 
 ### 7.3 The audit log is tamper-evident and verifiable by outside parties
 
-Every record access and change appends an entry to a Merkle tree log using the Certificate Transparency construction (RFC 6962), with tree math from `golang.org/x/mod/sumdb/tlog`.
+Every record access and change appends an entry to a separate append-only `audit_events` table and into a Merkle tree log using the Certificate Transparency construction (RFC 6962), with tree math from `golang.org/x/mod/sumdb/tlog`.
 
-- Commit an append-only audit event before releasing record details, search results, exports or the first download byte. Capture the actor, agency, operation, affected record IDs, outcome and required purpose. Exclude search text and field values. A failed audit write blocks disclosure. Record mutations and their audit events atomically. The Merkle worker consumes durable events asynchronously. Test successful reads, denied access, audit storage failure and interrupted downloads. Record download authorization separately from completion.
+- Domain mutations write to both `events` and `audit_events` in the same transaction. Reads, search results, exports, and downloads commit an `audit_events` row before releasing data or the first download byte. Capture the actor, agency, operation, affected record IDs, outcome and required purpose. Exclude search text and field values. A failed audit write blocks disclosure. The Merkle worker consumes durable `audit_events` asynchronously. Test successful reads, denied access, audit storage failure and interrupted downloads. Record download authorization separately from completion.
 - Leaves hold a hash of the audit event; the event itself stays in Postgres.
-- At a fixed interval, NyxOps signs a checkpoint (tree size and root hash) with an Ed25519 key in the signed-note format.
+- At a fixed interval, NyxOps signs a checkpoint (tree size and root hash) with an Ed25519 key in the signed-note format. Store the checkpoint signing key outside the database (with the agency's key source) and support key rotation with overlapping verification keys.
 - Agencies can publish checkpoints to an oversight body, a court, or a public endpoint.
 - Each agency chooses its own witnesses (for example a state auditor, a court clerk, or a neighboring agency) that cosign checkpoints with their own Ed25519 keys. NyxOps doesn't run or require a shared witness network; `nyx verify-audit` checks cosignatures against the witness keys the agency configures (D-012).
 - `nyx verify-audit` proves any entry is included and any later checkpoint extends an earlier one. A database administrator who edits or deletes an entry breaks the proof.
+- Retain and archive older `audit_events` partitions per CJIS and state retention requirements while preserving signed checkpoints and tree hashes so `nyx verify-audit` remains valid across archived ranges.
 
 Checkpoints reveal only a size and a hash, so publishing them exposes no CJI. The database also revokes `UPDATE` and `DELETE` on audit tables from the application role, and `pgaudit` records direct database sessions.
 
 ### 7.4 Crypto-shredding makes expungement reach backups
 
-Each record group (a person's record set, or an incident) has its own data encryption key, wrapped by the agency's key-encryption key. Sensitive columns and attached files are encrypted with the data key.
+Each top-level record (each person record, each incident) has its own data encryption key (DEK), wrapped by the agency's key-encryption key (KEK). Sensitive columns and attached files are encrypted with that record's DEK. Join and link rows between records hold only opaque UUIDs and non-PII role codes, so expunging one person destroys that person's DEK and tombstones or redacts the link without destroying an incident's DEK.
 
 When a court orders expungement, NyxOps destroys the data key and records the destruction in the audit log. Live access ends on destruction. Historical key copies age out under the recovery policy below.
 
 The hard part is the key table itself: if full backups contain it, old backups still hold the destroyed key. The design keeps wrapped data keys in a separate key store with its own backup stream and a fixed 30-day retention window (D-011). An expungement completes when that window passes, and the system reports the completion date to the requester.
 
-The small-agency profile stores wrapped keys in a dedicated volume outside the PostgreSQL cluster and file-store backup set. Back up that volume separately and enforce the same 30-day expiry on every snapshot and replica backup containing keys. Keep an independently durable, append-only register of destroyed key IDs. Record the destruction intent before removing a key, deny its use immediately and retry removal after interruption. Restore offline, reconcile keys against the latest register and refuse to serve if its freshness cannot be verified. Check legal holds before authorizing destruction.
+The key store sits behind a `KeyStore` interface:
 
-Key-encryption-key sources sit behind an interface: an encrypted file for small agencies, TPM, cloud KMS, or HashiCorp Vault.
+- **Small-agency Docker Compose profile:** stores wrapped keys in a dedicated local volume (outside the PostgreSQL cluster and file-store backup set) backed up separately with a 30-day expiry on every snapshot and replica backup.
+- **Multi-replica Helm profile:** stores wrapped keys and the destruction register in a separate dedicated key-store PostgreSQL instance (or an external KMS/Vault paired with a separate destruction-register database), enforcing the same 30-day backup expiry outside the main RMS backup stream.
+
+In both profiles, keep an independently durable, append-only register of destroyed key IDs. Record the destruction intent before removing a key, deny its use immediately and retry removal after interruption. Restore offline, reconcile keys against the latest register and refuse to serve if its freshness cannot be verified. Check legal holds before authorizing destruction.
+
+Key-encryption-key sources sit behind an interface: an encrypted file for small agencies, TPM, cloud KMS, or HashiCorp Vault. Support online KEK rotation (re-wrapping DEKs without re-encrypting records) and document KEK backup/escrow procedures during `nyx init`.
 
 ### 7.5 The master person index resolves duplicates with explainable matching
 
@@ -199,16 +206,16 @@ Duplicate person records are a chronic problem in existing RMS products. NyxOps 
 ### 7.7 NIBRS rules are data, and the same rules drive forms and validation
 
 - The FBI NIBRS technical specification error codes become rule packs: JSON files containing CEL expressions, error codes, messages, and the fields each rule reads. A JSON Schema validates pack files at build time.
-- States add their IBR variations as extra packs without changing code.
-- The API validates against the active packs on every save, and the frontend shows errors inline as the officer types, instead of at the month-end submission.
+- Base FBI packs embed into `nyx`; states add their IBR variations as extra packs in a runtime directory without changing code.
+- The API validates against the active packs on save and field blur while online, and the frontend shows errors inline instead of waiting for month-end submission.
 - The forms engine generates field visibility, required fields, and allowed values from the same definitions, so the UI and the server can't drift apart.
-- Exports produce NIBRS XML from the same data model. Offline validation reuses the rule packs compiled to WebAssembly (section 7.8).
+- Exports produce NIBRS XML from the same data model. Offline rule evaluation (a lightweight JS CEL evaluator versus WebAssembly) is deferred to Phase 6 when offline drafts are built.
 
 ### 7.8 Offline drafts let officers write reports without a connection
 
 Each draft belongs to one officer until submission.
 
-- The browser stores drafts in IndexedDB, encrypted with a non-extractable WebCrypto key tied to the session.
+- The browser stores drafts in IndexedDB, encrypted with a non-extractable WebCrypto key derived or unwrapped via a per-device officer PIN/passphrase (or WebAuthn PRF) while offline, and cleared on explicit logout or shift handoff. This prevents CJIS idle session locks from destroying unsent field drafts while protecting drafts on shared mobile terminals.
 - Drafts use client-generated UUIDv7 identifiers.
 - The server copy wins on submission and runs full validation; the event log feeds draft updates back to the officer's other devices.
 - CJIS rules for mobile devices still apply: agencies must manage the devices that store drafts.
@@ -225,9 +232,9 @@ Constraints:
 
 ## 8. Security baseline
 
-- Builds: `CGO_ENABLED=0`, `GOFIPS140` set, distroless static base image, non-root user, read-only root filesystem.
-- Transport: TLS 1.2 or later everywhere, including between `nyx` and PostgreSQL.
-- Sessions: server-side, idle timeout and absolute lifetime set per agency to match CJIS session-lock requirements.
+- Builds: Go 1.24+, `CGO_ENABLED=0`, `GOFIPS140` set (pin the mode in build config and test Ed25519 checkpoint signing under it), distroless static base image, non-root user, read-only root filesystem (with mounted tmpfs/`emptyDir` scratch for Typst).
+- Transport and headers: TLS 1.2 or later everywhere, including between `nyx` and PostgreSQL; HSTS, CSP, CSRF origin/token checks, and `Cache-Control: no-store` on API responses carrying CJI.
+- Sessions and MFA: server-side sessions with per-agency idle timeout and absolute lifetime to match CJIS session-lock requirements; verify OIDC `amr`/`acr` MFA claims when configured.
 - Secrets: no default passwords; `nyx init` generates every secret at install.
 - CI: `govulncheck`, `golangci-lint` with `gosec`, `go test -race`, Playwright end-to-end tests, Renovate for dependency updates.
 - Supply chain: SBOM from `syft` attached to every release, images signed with `cosign`, SLSA build provenance from GitHub Actions.
@@ -237,27 +244,40 @@ Constraints:
 
 ```
 nyxops/
+  .github/workflows/    CI, security scans, and signed release pipelines
+  api/                  OpenAPI specifications (/api/v1)
   cmd/nyx/              entry point and subcommands
   internal/
     api/                generated server interfaces and handlers
+    auth/               OIDC login transactions, sessions, memberships
     authz/              policy engine and SQL compiler
-    audit/              Merkle log, checkpoints, verification
+    audit/              audit_events, Merkle log, checkpoints, verification
+    backup/             backup and restore orchestration
+    crypto/             envelope encryption, KeyStore and KEK sources
+    db/                 sqlc generated code, tx/RLS helpers, migration runner
     events/             event log and consumers
-    crypto/             envelope encryption, key sources
     files/              evidence store and backends
+    jobs/               job interface and River adapter
     mpi/                person matching
     nibrs/              rule packs, validation, XML export
-    records/            incidents, persons, arrests, evidence, warrants
+    pdf/                Typst templates and sandboxed runner
+    records/            incidents, persons, evidence (arrests/warrants deferred)
+    retention/          retention schedules, legal holds, crypto-shredding
   db/
     migrations/         SQL migrations, including generated RLS policies
     queries/            sqlc query files
-  rules/                NIBRS and state rule packs (JSON)
+  policies/             CEL authorization policy definitions
+  rules/                base FBI NIBRS rule packs (JSON)
   web/                  React frontend
   deploy/
     compose/            small-agency Docker Compose profile
     helm/               Kubernetes chart
   docs/
-    decisions/          architecture decision records
+    decisions/          architecture decision records (D-014 onward)
+  nyx-project-specs/    architecture specification
+  nyx-logo-primary/     brand assets
+  SECURITY.md           vulnerability disclosure policy
+  CONTRIBUTING.md       contributor and DCO guide
 ```
 
 ## 10. Deployment profiles
@@ -266,26 +286,26 @@ The small-agency profile runs these containers:
 
 | Container | Role | Notes |
 | --- | --- | --- |
-| `nyx` | API, web UI, workers, TLS | Single static binary |
+| `nyx` | API, web UI, workers, TLS, sandboxed Typst | Single static binary + static Typst binary; mounted tmpfs scratch and dedicated key-store volume |
 | `postgres` | All application state, job queue, search, sessions, audit log | Also hosts Zitadel's database |
 | `zitadel` | Identity | Omitted when the agency uses its own OIDC provider |
 | `garage` | Object storage | Omitted when files use local disk or existing S3 |
 
 Target hardware for an agency of up to roughly 100 sworn officers: 2 vCPU, 4 GB RAM, 100 GB SSD. These figures are targets; load testing in phase 2 must confirm them.
 
-Larger and multi-agency deployments use the Helm chart with separate `serve` and `worker` replicas and a managed or replicated PostgreSQL.
+Larger and multi-agency deployments use the Helm chart with separate `serve` and `worker` replicas (with Typst either in the worker image or as a sidecar), a managed or replicated PostgreSQL, and a separate key-store PostgreSQL instance or external KMS/Vault.
 
 ## 11. Roadmap
 
 | Phase | Deliverables | Exit criteria |
 | --- | --- | --- |
 | 0. Foundations | Monorepo, migration runner, HTTP layer, OIDC sign-in against any provider, sessions, CI and release signing | A signed release installs with `nyx init` and a user signs in through Zitadel and Entra ID |
-| 1. Trust core | Event log, Merkle audit log, policy-to-RLS compiler, envelope encryption | Differential authorization tests pass; `nyx verify-audit` detects a manually altered entry |
+| 1. Trust core | Event log, `audit_events` + Merkle audit log, policy-to-RLS compiler, envelope encryption | Differential authorization tests pass; `nyx verify-audit` detects a manually altered entry |
 | 2. First vertical slice | Synthetic incident records with narratives and status workflow. Attachment handling starts in phase 4 | End-to-end incident creation under RLS with audit entries; load test confirms section 10 targets |
 | 3. NIBRS | Rule engine, FBI rule pack, forms engine, XML export | Exports pass FBI test-file validation |
 | 4. Persons and evidence | Master person index, evidence store, chain of custody | Matching precision and recall measured on a synthetic dataset |
 | 5. Retention | Crypto-shredding, retention schedules, legal holds, backup and restore | A restore drill recovers an ordinary record and its attachment, honors holds and confirms an expunged record stays unreadable after the key backup window |
-| 6. Field and AI | Offline drafts, AI assistance | Pilot with one agency |
+| 6. Field and AI | Offline drafts, offline NIBRS validation, AI assistance | Pilot with one agency |
 
 ### Product scope and pilot readiness
 
@@ -298,8 +318,8 @@ Every component NyxOps links into its own binary or ships in its frontend bundle
 | Component | License | Effect on NyxOps |
 | --- | --- | --- |
 | `pgx`, React, TanStack, Radix, shadcn/ui, Vite, Tailwind CSS | MIT | None beyond keeping notices |
-| `go-oidc`, `go-jose`, `cel-go`, TypeScript | Apache-2.0 | Keep notices; compatible with any permissive license |
-| `golang.org/x/crypto`, `golang.org/x/mod`, Go standard library, `protobuf` and `antlr4` (via `cel-go`) | BSD-3-Clause | None beyond keeping notices |
+| `go-oidc`, `go-jose` (transitive), `cel-go`, TypeScript | Apache-2.0 | Keep notices; compatible with any permissive license |
+| `golang.org/x/crypto`, `golang.org/x/mod`, `golang.org/x/oauth2`, Go standard library, `protobuf` and `antlr4` (via `cel-go`) | BSD-3-Clause | None beyond keeping notices |
 | River | MPL-2.0 | Changes to River's own files stay MPL-2.0; the rest of NyxOps can use any license |
 | Zitadel, Garage | AGPL-3.0 | Separate processes, not linked; NyxOps ships unmodified upstream images, so no obligation passes to NyxOps code |
 | PostgreSQL, Typst | PostgreSQL License, Apache-2.0 | Separate processes |
@@ -324,3 +344,4 @@ NyxOps uses Apache-2.0. Contributors sign commits under the Developer Certificat
 | D-012 | Audit checkpoints cosigned by agency-chosen witnesses only | Accepted |
 | D-013 | Apache-2.0 for all NyxOps code, contributions under DCO | Accepted |
 | D-014 | [Record access, storage and pilot readiness](../docs/decisions/0014-record-lifecycle.md) | Accepted |
+| D-015 | [Operational seams, key boundaries, and repository layout](../docs/decisions/0015-operational-seams.md) | Accepted |
