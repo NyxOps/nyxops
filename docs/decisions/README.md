@@ -22,3 +22,4 @@ Add a numbered file (`NNNN-short-title.md`) and update the decision log in `nyx-
 | --- | --- | --- |
 | D-014 | [Record access, storage and pilot readiness](0014-record-lifecycle.md) | Accepted |
 | D-015 | [Operational seams, key boundaries, and repository layout](0015-operational-seams.md) | Accepted |
+| D-016 | [International and low-resource readiness](0016-international-and-low-resource-readiness.md) | Accepted |

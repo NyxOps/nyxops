@@ -1,61 +1,46 @@
 # CLAUDE.md
 
-NyxOps is an open source police records management system (RMS). It stores Criminal Justice Information (CJI) and must meet the FBI CJIS Security Policy. Treat every change as security-sensitive.
+NyxOps is an open source police RMS for small and resource-constrained agencies worldwide, designed to meet the FBI CJIS Security Policy as its security baseline. Treat every change as security-sensitive.
 
 ## Source of truth
 
-- `nyx-project-specs/NyxOps_Architecture.md` defines the architecture and the accepted decision log (D-001 to D-015). Read the relevant section before designing anything, and follow it over any older document.
-- If a task conflicts with the spec, stop and tell the user instead of working around the spec.
-
-## Current state
-
-- Keep code, specifications and deployment files in this monorepo.
-- No Go code, build commands, or tests exist yet. Don't invent commands; check the repo first.
-
-## Target stack
-
-- Go in one binary (`nyx`) for API, web UI, and workers; `CGO_ENABLED=0`, `GOFIPS140` on.
-- PostgreSQL 18 as the only stateful core service. Use `pgx` v5 and `sqlc`; no ORM. Primary keys are UUIDv7.
-- `net/http` with spec-first OpenAPI and `oapi-codegen`.
-- River for jobs, `go-oidc` for sign-in (Zitadel bundled), `cel-go` for rules and policies.
-- React SPA built with Vite and served by the Go binary; TanStack Router and Query, shadcn/ui, Tailwind CSS.
-- Monorepo layout is in the spec, section 9.
+- [nyx-project-specs/NyxOps_Architecture.md](nyx-project-specs/NyxOps_Architecture.md) is the source of truth (v1.3, D-001 to D-016). Stop and ask the user if a task conflicts with it.
+- No Go code, build commands, or tests exist yet. Check the repo before running commands.
 
 ## Rules
 
 Dependencies:
 
-- Don't add a runtime dependency (Go module or frontend package that ships to production) without a decision record in `docs/decisions/` naming the policy rule applied, the license, the transitive dependency count, and the exit plan. Ask the user before adding one.
+- Do not add a production runtime dependency (Go or frontend) without user approval and an ADR in `docs/decisions/` (policy rule, license, transitive count, exit plan).
 - Never link GPL, LGPL, or AGPL code. Linked code must be permissive or MPL-2.0.
-- Never implement cryptographic primitives, TLS, an identity provider, password storage, MFA, or an expression language. Use the Go standard library, `go-oidc`, and `cel-go`.
-- Build in-house: authorization, audit log, event log, NIBRS validation, person matching, evidence store, retention, migrations, metrics output, S3 client.
+- Never implement crypto primitives, TLS, an IdP, password/MFA storage, or an expression language.
+
+Domain and localization:
+
+- Keep core schemas country-agnostic: never hard-code US-only crime codes, address/phone formats, or English-only name assumptions. Support Unicode, RTL, single names, patronymics, and approximate DOBs.
 
 Database and tenancy:
 
-- The application role has no superuser or `BYPASSRLS`. Every tenant table has an `agency_id` column, RLS enabled, and `FORCE ROW LEVEL SECURITY`.
-- Set request context with `set_config('app.agency_id', $1, true)` inside the transaction. Never use session-level `SET` on pooled connections.
-- RLS policies come from the policy compiler (`internal/authz`). Don't hand-write a policy that diverges from the CEL definition.
-- Timestamps are `timestamptz`. Approximate times use `tstzrange`.
-- Uniqueness that is per agency includes `agency_id` in the constraint.
-- Records are soft-deleted; expungement uses crypto-shredding (spec 7.4), not `DELETE`.
+- Non-superuser app role without `BYPASSRLS`; every tenant table has `agency_id`, RLS enabled, and `FORCE ROW LEVEL SECURITY`.
+- Set tenant context with `set_config('app.agency_id', $1, true)` inside the transaction; never session-level `SET`.
+- Generate RLS policies from `internal/authz`; never hand-write diverging policies.
+- Use UUIDv7 PKs, `timestamptz`, `tstzrange` for approximate times, and agency-scoped unique constraints.
+- Soft-delete records; expungement uses crypto-shredding (spec 7.4), never `DELETE`.
 
 Events and audit:
 
-- Write each domain change, its event row (`events`), and its audit row (`audit_events`) in the same transaction.
-- Commit an `audit_events` row before returning any sensitive read, search, export, or download; never mix read-access rows into `events`.
-- Event consumers read by `xact_id` up to the `pg_snapshot_xmin` watermark, never by a serial cursor.
-- Never update or delete audit rows, and never write code that needs to.
-- Keep CJI values out of event payloads, logs, metrics, error messages, and test fixtures. Use synthetic data in tests.
+- Write domain mutations, `events`, and `audit_events` in the same transaction.
+- Commit an `audit_events` row before returning any sensitive read, search, export, or download; never put reads in `events`.
+- Consume `events` by `xact_id` up to `pg_snapshot_xmin`, never a serial cursor.
+- Never update or delete audit rows. Keep CJI out of event payloads, logs, metrics, errors, and test fixtures (use synthetic data).
 
 Security claims:
 
-- Don't claim CJIS compliance or FIPS 140-3 validation in code comments, docs, or release notes. Say "designed to meet" until certification exists.
+- Never claim CJIS compliance or FIPS 140-3 validation; say "designed to meet" until certified.
 
 ## Working conventions
 
-- Commit and push only when the user asks. Make each commit a focused change on a topic branch and open a pull request against `main`.
-- Follow the repository's commit subject format, `type: Imperative summary`, for example `docs: Clarify evidence retention`. Use the same format for the PR title. Add a commit body when the change needs context.
-- Sign off every commit with `git commit -s` for the Developer Certificate of Origin. Summarize the changes and verification in the PR description.
-- License headers and new files are Apache-2.0.
-- An architecture change means updating the spec's decision log and adding a decision record, in the same change.
+- Commit and push only when asked. Use focused topic branches, PRs against `main`, `type: Imperative summary` subjects, and `git commit -s` (DCO).
+- New files use Apache-2.0 headers.
+- Architecture changes must add an ADR in `docs/decisions/` and update the spec's decision log in the same change.
 - Docs use sentence case headings and plain, active sentences.
