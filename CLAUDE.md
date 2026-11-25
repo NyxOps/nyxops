@@ -4,23 +4,21 @@ NyxOps is an open source police records management system (RMS). It stores Crimi
 
 ## Source of truth
 
-- `nyx-project-specs/NyxOps_Architecture.md` defines the architecture and the accepted decision log (D-001 to D-013). Read the relevant section before designing anything, and follow it over any older document.
-- `archive/` holds superseded documents. Don't build from them.
+- `nyx-project-specs/NyxOps_Architecture.md` defines the architecture and the accepted decision log (D-001 to D-014). Read the relevant section before designing anything, and follow it over any older document.
 - If a task conflicts with the spec, stop and tell the user instead of working around the spec.
 
 ## Current state
 
-- This repo (`NyxOps/nyxops`, formerly `nyx-design`) is the monorepo. The old scaffold repos (`nyx-api`, `nyx-web`, `nyx-infra`, `nyx-worker`) were deleted on 2026-11-23; don't recreate them or reintroduce FastAPI, Next.js, Celery, RabbitMQ, Redis, MinIO, Meilisearch, or Keycloak.
-- Spec section 2 lists the scaffold's defects; don't repeat them in the port.
+- Keep code, specifications and deployment files in this monorepo.
 - No Go code, build commands, or tests exist yet. Don't invent commands; check the repo first.
 
 ## Target stack
 
 - Go in one binary (`nyx`) for API, web UI, and workers; `CGO_ENABLED=0`, `GOFIPS140` on.
 - PostgreSQL 18 as the only stateful core service. Use `pgx` v5 and `sqlc`; no ORM. Primary keys are UUIDv7.
-- `net/http` with spec-first OpenAPI and `oapi-codegen`; no web framework, no GraphQL.
+- `net/http` with spec-first OpenAPI and `oapi-codegen`.
 - River for jobs, `go-oidc` for sign-in (Zitadel bundled), `cel-go` for rules and policies.
-- React SPA built with Vite and served by the Go binary; TanStack Router and Query, shadcn/ui, Tailwind CSS. No Next.js.
+- React SPA built with Vite and served by the Go binary; TanStack Router and Query, shadcn/ui, Tailwind CSS.
 - Monorepo layout is in the spec, section 9.
 
 ## Rules
@@ -54,7 +52,9 @@ Security claims:
 
 ## Working conventions
 
-- Commits need a DCO sign-off (`git commit -s`). Don't commit or push unless the user asks.
+- Commit and push only when the user asks. Make each commit a focused change on a topic branch and open a pull request against `main`.
+- Follow the repository's commit subject format, `type: Imperative summary`, for example `docs: Clarify evidence retention`. Use the same format for the PR title. Add a commit body when the change needs context.
+- Sign off every commit with `git commit -s` for the Developer Certificate of Origin. Summarize the changes and verification in the PR description.
 - License headers and new files are Apache-2.0.
 - An architecture change means updating the spec's decision log and adding a decision record, in the same change.
 - Docs use sentence case headings and plain, active sentences.
