@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Pinned build-time toolchain for NyxOps (spec Section 4, Rule 4).
+
+[tools]
+go = "1.27.4"
+sqlc = "1.31.1"
+golangci-lint = "2.15.0"
+oapi-codegen = "2.9.0"
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.10.0"
