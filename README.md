@@ -6,12 +6,11 @@ The NyxOps monorepo: architecture, specifications, brand assets, and (from phase
 | --- | --- |
 | `nyx-project-specs/NyxOps_Architecture.md` | The architecture specification. It's the source of truth whenever this README and the spec disagree. |
 | `nyx-logo-primary/` | Logo source (`.ai`) and PNG |
-| `archive/` | Superseded documents, kept for history. Don't build from them. |
 | `CLAUDE.md` | Instructions for AI coding agents |
 
 ## Project status
 
-The original Python and Next.js scaffold repos (`nyx-api`, `nyx-web`, `nyx-infra`, `nyx-worker`) were deleted on 2026-11-23. This repo, formerly `nyx-design`, is now the monorepo; Go code arrives in phase 0 using the layout below. Section 2 of the spec lists the scaffold defects the port must not repeat.
+The repository currently contains the accepted architecture and brand assets. Phase 0 introduces the Go application.
 
 ## Architecture
 
@@ -87,7 +86,7 @@ docs/decisions/       architecture decision records
 | Audit log | RFC 6962 Merkle log with signed checkpoints cosigned by agency-chosen witnesses | 7.3 |
 | Crypto-shredding | Per-record-group data keys; destroying a key expunges the record from backups once the 30-day key-store backup window passes | 7.4 |
 | Master person index | Fellegi-Sunter matching with phonetic comparators; merges go through review and can be reversed | 7.5 |
-| Evidence store | Content-addressed by SHA-256, encrypted before storage, legal holds enforced | 7.6 |
+| Evidence store | Independent encrypted objects, SHA-256 custody digests, legal holds enforced | 7.6 |
 | NIBRS | Rule packs in JSON drive validation, forms, and XML export | 7.7 |
 | Offline drafts | IndexedDB drafts encrypted with a WebCrypto key; the server copy wins on submit | 7.8 |
 
@@ -113,7 +112,7 @@ A new runtime dependency needs a decision record in `docs/decisions/` that names
 - Store timestamps as `timestamptz`.
 - Don't claim FIPS 140-3 validation in docs or releases until a CMVP certificate covers the shipped Go version.
 
-CI runs `govulncheck`, `golangci-lint` with `gosec`, `go test -race`, and Playwright end-to-end tests. Releases include an SBOM from `syft`, `cosign` signatures, and SLSA provenance.
+Phase 0 will introduce `govulncheck`, `golangci-lint` with `gosec`, `go test -race`, and Playwright end-to-end tests. Planned releases include an SBOM from `syft`, `cosign` signatures, and SLSA provenance.
 
 ## Roadmap
 
