@@ -38,6 +38,15 @@ Security claims:
 
 - Never claim CJIS compliance or FIPS 140-3 validation; say "designed to meet" until certified.
 
+Formal verification:
+
+- Model-check high-harm state machines and concurrency protocols with `/statechart` before implementing them, then bind each check to the code with `/create-formal-verification-skill` (keep in sync with `/maintain-formal-verification-skill`):
+  - Phase 0: OIDC sign-in, session revocation, and `nyx init` bootstrap.
+  - Phase 1: `xact_id` / `pg_snapshot_xmin` event consumer, audit-before-disclosure + Merkle checkpointing, and RLS/share/connection-pool isolation.
+  - Phase 4: Resumable encrypted evidence uploads and chain-of-custody finalization.
+  - Phase 5: Crypto-shredding, legal holds, destruction register, and restore reconciliation.
+  - Phase 6: Offline draft key wipe on shift handoff and station-to-regional sync.
+
 ## Working conventions
 
 - Commit and push only when asked. Use focused topic branches, PRs against `main`, `type: Imperative summary` subjects, and `git commit -s` (DCO).
